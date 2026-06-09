@@ -1,0 +1,398 @@
+---
+title: "Antibody_script"
+author: "Bettina"
+date: "2024-09-29"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+#load packages and data
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+library(Hmisc)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(readr)
+library(FSA)
+library(tidyr)
+library(data.table)
+library(pheatmap)
+library(caret)
+library(stringr)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(magick)
+library(lmtest)
+
+
+
+#base antibody table
+antibody_1 <-fread("LLD.probes.txt")
+
+
+#this table contains the taxa
+new_taxa <- fread("media-3.csv")
+new_taxa <- new_taxa[,c(1,15)]
+
+#merge the data
+antibody_p <- merge(antibody_1, new_taxa, by.x = "probe", by.y = "Peptide", all.x = TRUE)
+
+#this table contains the promiscuity values
+promisc_12_new <- readRDS("promiscuity.rds")
+
+
+##########################################################
+
+
+#modify the promiscuity table &  formatting
+
+promisc_12_new$HLA <- rownames(promisc_12_new)
+rownames(promisc_12_new) <- NULL
+
+promisc_12_new <- promisc_12_new %>%
+  rename(gfeller_100 = Allele.promiscuity)
+
+##get the DR promiscuity in correct format
+promisc_12_new_dr <- subset(promisc_12_new, nchar(HLA) == 8)
+promisc_12_new_dr$HLA <- paste0("HLA_", substr(promisc_12_new_dr$HLA, 1, 4), "_", substr(promisc_12_new_dr$HLA, 5, 8))
+promisc_12_new_dr <- promisc_12_new_dr %>%
+  select( "HLA","gfeller_100" )
+
+##get the DP DQ promiscuity correct format
+promisc_12_new_dpdq <- subset(promisc_12_new, nchar(HLA) == 17)
+promisc_12_new_dpdq$HLA_A <- substr(promisc_12_new_dpdq$HLA, 1, 8)
+promisc_12_new_dpdq$HLA_B <- substr(promisc_12_new_dpdq$HLA, 10, 17)
+promisc_12_new_dpdq$HLA_A <- paste0("HLA_", substr(promisc_12_new_dpdq$HLA_A, 1, 4), "_", substr(promisc_12_new_dpdq$HLA_A, 5, 8))
+promisc_12_new_dpdq$HLA_B <- paste0("HLA_", substr(promisc_12_new_dpdq$HLA_B, 1, 4), "_", substr(promisc_12_new_dpdq$HLA_B, 5, 8))
+promisc_12_new_dpdq <- promisc_12_new_dpdq %>%
+  select( "HLA", "HLA_A", "HLA_B","gfeller_100" )
+
+```
+
+
+#Filter for nonpathogens vs pathogens
+```{r}
+
+#this table contains the information about the pathogenicity
+
+
+pathogens <- read_excel("final_pathogen_groups_2.xlsx")
+
+#filtering for pathogens
+
+pathogens_p <- pathogens %>%
+  filter(Pth == "T") #set filter to F for non-pathogens
+path <- unique(pathogens_p$Taxon)
+
+path_res <- data.frame()
+for (x in path) {
+  tmp <- antibody_p[antibody_p$Taxa == x,]
+  path_res <- rbind(path_res, tmp)
+}
+
+########
+
+antibody_1<- path_res %>%
+  select("HLA", "probe", "beta", "FDR")
+
+antibody_1$FDR <- format(antibody_1$FDR, scientific = FALSE)
+
+
+```
+
+
+
+#DR alleles
+```{r}
+
+#calculate the ratio of positive and negative associations for the DR alleles, FDR 0.05
+
+#for general:
+
+antibody_1<- antibody_1 %>%
+  select("HLA", "probe", "beta", "FDR")
+
+
+antibody_DR<- antibody_1[grepl("DR", antibody_1$HLA), ]
+HLA_DR_unique <- unique(antibody_DR$HLA)
+
+
+antibody_DR <- subset(antibody_DR, FDR <0.05)
+
+#looping through each unique HLA alleles to count the ratio of positive and negative associations (adding +1 to avoid dividing by 0)
+
+#HLA_DR_unique <- unique(antibody_1$HLA)
+
+antibody_res_DR <- data.frame(HLA = character(0), 
+                              pos = numeric(0), 
+                              neg= numeric(0), 
+                              ratio = numeric(0), 
+                              pos1 = numeric(0), 
+                              neg1= numeric(0), 
+                              ratio1 = numeric(0))
+
+###
+
+for (x in HLA_DR_unique){
+  
+  tmp <- antibody_DR[antibody_DR$HLA == x, ]
+  
+  if (nrow(tmp) == 0) {
+    pos <- 0
+    neg <- 0
+  } else {
+    pos <- sum(tmp$beta > 0)
+    neg <- sum(tmp$beta < 0)
+  }
+  
+  pos1 <- pos + 1
+  neg1 <- neg + 1
+  
+  ratio <- ifelse(neg == 0, NA, pos/neg)
+  ratio1 <- pos1/neg1
+  
+  tmp_df <- data.frame(
+    HLA = x,
+    pos = pos,
+    neg = neg,
+    ratio = ratio,
+    pos1 = pos1,
+    neg1 = neg1,
+    ratio1 = ratio1
+  )
+  
+  antibody_res_DR <- rbind(antibody_res_DR, tmp_df)
+}
+
+#modify the DR df
+
+antibody_res_DR <- merge (antibody_res_DR, promisc_12_new_dr, by = "HLA", all.x = TRUE)
+antibody_res_DR$HLA_A_in <- NA
+antibody_res_DR$HLA_B_in <- NA
+antibody_res_DR$HLA_A <- NA
+antibody_res_DR$HLA_B <- NA
+
+antibody_res_DR <- antibody_res_DR%>%
+  select("HLA", "HLA_A", "HLA_B",  "pos", "neg","ratio", "pos1", "neg1", "ratio1", "gfeller_100", "HLA_A_in", "HLA_B_in")
+
+```
+
+
+#DPDQ alleles
+```{r}
+
+#calculate the ratio of positive and negative associations for the DP and DQ alleles, FDR 0.05
+
+# Start from promiscuity tables. For each alpha-beta chain pair, calculate the ratio of positive and negative associations as follows:
+
+#Positive: beta is positive for both chains and at least one is significant (FDR < 0.05)
+#Negative: beta is negative for both chains and at least one is significant (FDR < 0.05)
+
+
+rev_all_dpdq <- data.frame(HLA_A = character(nrow(promisc_12_new_dpdq)),
+                           HLA_B = character(nrow(promisc_12_new_dpdq)),
+                           ratio = numeric(nrow(promisc_12_new_dpdq)),
+                          pos = numeric(nrow(promisc_12_new_dpdq)),
+                          neg = numeric(nrow(promisc_12_new_dpdq)), 
+                          ratio1 = numeric(nrow(promisc_12_new_dpdq)),
+                          pos1 = numeric(nrow(promisc_12_new_dpdq)),
+                          neg1 = numeric(nrow(promisc_12_new_dpdq)))
+
+
+
+for (i in 1:nrow(promisc_12_new_dpdq)){
+  dpdq <- promisc_12_new_dpdq[i,]
+  HLA_A <- dpdq[,"HLA_A"]
+  HLA_B <- dpdq[,"HLA_B"]
+  ab_A <-filter(antibody_1, HLA == HLA_A)
+  colnames(ab_A) <- c("HLA_A", "probe", "beta_A", "FDR_A")
+  ab_B <-filter(antibody_1, HLA == HLA_B)
+  colnames(ab_B) <- c("HLA_B", "probe", "beta_B", "FDR_B")
+  ab_merge <- merge(ab_A, ab_B, by = "probe")
+  ab_merge$res <- ifelse((ab_merge$beta_A > 0 & ab_merge$beta_B > 0) & (ab_merge$FDR_A < 0.05 |   ab_merge$FDR_B < 0.05), "positive",
+                     ifelse((ab_merge$beta_A < 0 & ab_merge$beta_B < 0) & (ab_merge$FDR_A < 0.05 | ab_merge$FDR_B < 0.05), "negative", "not_good"))
+  ab_table <- table(ab_merge$res)
+  neg <- ab_table["negative"]
+  pos <- ab_table["positive"]
+  ratio <- pos/neg
+  
+  # adding +1 to the numbers 
+  if (!is.na(pos) && !is.na(neg)) {
+    
+    # Add 1 to both pos and neg if both are numbers
+    pos1 <- pos + 1
+    neg1 <- neg + 1
+    } else if (is.na(pos) & !is.na(neg)) {
+    # Add 1 to both pos and neg if either is NA
+    pos1 <- 1
+    neg1 <- neg + 1
+    } else if (is.na(neg) & !is.na(pos)){
+    neg1 = 1
+    pos1 = pos + 1
+    #will not change of both are NA
+    } else {
+    neg1 = neg
+    pos1 = pos
+    }
+
+  ratio1 <- pos1/neg1
+  
+  rev_all_dpdq[i, "HLA_A"] <- HLA_A
+  rev_all_dpdq[i, "HLA_B"] <- HLA_B
+  rev_all_dpdq[i, "ratio"] <- ratio
+  rev_all_dpdq[i, "pos"] <- pos
+  rev_all_dpdq[i, "neg"] <- neg
+  rev_all_dpdq[i, "ratio1"] <- ratio1
+  rev_all_dpdq[i, "pos1"] <- pos1
+  rev_all_dpdq[i, "neg1"] <- neg1
+}
+
+rev_all_dpdq <- cbind(rev_all_dpdq, promisc_12_new_dpdq)
+
+rev_all_dpdq <- rev_all_dpdq%>%
+  select("HLA", "HLA_A", "HLA_B", "pos", "neg","ratio", "pos1", "neg1", "ratio1", "gfeller_100")
+
+rownames(rev_all_dpdq) <- NULL
+
+#put a condition to replace the 0/0 NA alleles
+rev_all_dpdq$HLA_A_in <- rev_all_dpdq$HLA_A %in% antibody_p$HLA
+rev_all_dpdq$HLA_B_in <- rev_all_dpdq$HLA_B %in% antibody_p$HLA
+
+
+condition <- (rev_all_dpdq$HLA_A_in == TRUE & rev_all_dpdq$HLA_B_in == TRUE & is.na(rev_all_dpdq$neg) & is.na(rev_all_dpdq$pos))
+rev_all_dpdq$ratio1[condition] <- 1 
+```
+
+#FDR 0.05 merged
+```{r}
+#merge the DR and DPDQ tables
+
+rev_res <- rbind(rev_all_dpdq, antibody_res_DR)
+rev_res$log2ratio <- log2(rev_res$ratio1)
+```
+
+#Figure 3 plot B and C
+```{r}
+
+#plotting- it is needed to re-rn the script for the pathogens and not pathogens 
+
+correl = rcorr(rev_res$gfeller_100, rev_res$log2ratio, type = "spearman")
+
+
+#Pathogens
+
+rev_res$log2ratio <- log2(rev_res$ratio1)
+
+
+correl = rcorr(rev_res$gfeller_100, rev_res$log2ratio, type = "spearman")
+
+
+rh = round(correl$r[1,2], 2)
+p = correl$P[1,2]
+p_formatted <- formatC(p, format = "e", digits = 2)
+p_formatted <- gsub("e", "%*%10^", p_formatted)
+
+label_spearman <- paste0("rho == ", rh, " ~ italic(p) == ", p_formatted)
+
+plot_3P <- ggplot(data = rev_res, aes(x = gfeller_100, y = log2ratio)) +
+    geom_point(size = 1,color = "#2C4E80") +
+    geom_smooth(method = "lm", se = TRUE, linetype = "dashed", color = "black", fill = "lightgrey", linewidth = 0.5)+
+     ylab(expression(log[2](positive/negative ~ associations))) +
+    xlab("Allele promiscuity")+
+    ggtitle("Pathogens")+
+    labs(tag = "B") +
+    theme_classic() +
+    theme(
+        plot.tag = element_text(face = "bold", size = 10),
+        plot.tag.position = c(0.02, 1),  
+        plot.title = element_text(size = 10),   
+        axis.title.x = element_text(size = 8),   
+        axis.title.y = element_text(size = 6),                  
+        axis.text.x = element_text(size = 8),                    
+        axis.text.y = element_text(size = 8),                   
+        legend.position = "none")+              
+    scale_y_continuous(limits = c(-3, 5))+
+    coord_fixed(ratio = 0.25) +             
+   annotate(geom = "text", x = 2.3, y = 5, label = parse(text = label_spearman), size = 3)
+
+#Non-pathogens
+
+rh = round(correl$r[1,2], 2)
+p = correl$P[1,2]
+p_formatted <- formatC(p, digits = 3)
+
+label_spearman <- paste0("rho == ", rh, " ~ italic(p) == ", p_formatted)
+
+plot_3NP <- ggplot(data = rev_res, aes(x = gfeller_100, y = log2(ratio1))) +
+    geom_point(size = 1,color = "#2C4E80") +
+    geom_smooth(method = "lm", se = TRUE, linetype = "dashed", color = "black", fill = "lightgrey", size = 0.5)+
+     ylab(expression(log[2](positive/negative ~ associations))) +
+    xlab("Allele promiscuity")+
+    ggtitle("Non-pathogens")+
+    labs(tag = "C") +
+    theme_classic() +
+    theme(
+        plot.tag = element_text(face = "bold", size = 10),
+        plot.tag.position = c(0.02, 1),  
+        plot.title = element_text(size = 10),   
+        axis.title.x = element_text(size = 8),   
+        axis.title.y = element_text(size = 6),                  
+        axis.text.x = element_text(size = 8),                    
+        axis.text.y = element_text(size = 8),                   
+        legend.position = "none")+              
+    scale_y_continuous(limits = c(-3, 5))+
+    coord_fixed(ratio = 0.25)+             
+   annotate(geom = "text", x = 2.3, y = 5, label = parse(text = label_spearman), size = 3)
+```
+
+
+#Figure 3 D
+```{r}
+
+new_3D <- data.frame(
+    Variable = c("Age", "Sex", "HLA-DP+\n DRB1\npromiscuity"),
+    `path` = c("-0.11\n (0.574)", "-2.02\n (0.708)", "30.90\n (0.033*)"),
+  `nonpath` = c("-0.34\n (0.026*)", "2.06\n (0.628)", "-5.66\n (0.619)")
+)
+
+# Update column names to include newlines
+colnames(new_3D) <- c("Variable","Pathogens\nCoeff\n(p-value)", "Non-pathogens\nCoeff\n(p-value)")
+
+
+new_3D <- ggtexttable(new_3D, rows = NULL, theme = ttheme("light", base_size = 8)) +
+          labs(tag = "D") +
+          theme(plot.tag = element_text(face = "bold", size = 10),  # Ensure the tag is plain and adjust size
+                plot.tag.position = c(0.02, 1.1),  # Position the tag
+                plot.margin = margin(t = 0.5, r = 0, b = 1.56, l = 0, unit = "cm"))
+
+
+```
+
+
+#Figure 3 put together
+```{r}
+
+#put togethet the figure 3
+
+plot_3A <- image_read("figure_2A.png")
+plot_3A <- rasterGrob(as.raster(plot_3A), interpolate = TRUE)
+
+layout = rbind(c(1,1,1,1,1, 1, 1, 1,1, 1),
+               c(1,1,1,1,1, 1, 1, 1,1, 1),
+               c(1,1,1,1,1, 1, 1, 1, 1, 1),
+               c(1,1,1,1,1, 1, 1, 1, 1, 1),
+         c(2, 2,2, 3, 3,3,4, 4, 4,4),
+         c(2, 2,2, 3, 3,3,4, 4, 4,4),
+         c(2, 2,2, 3, 3,3,4, 4, 4,4))
+         
+               
+
+figure_3 =  arrangeGrob(plot_3A,plot_3P,plot_3NP, new_3D, layout_matrix = layout)
+
+```
+
